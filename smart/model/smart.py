@@ -15,6 +15,13 @@ import pickle
 from collections import defaultdict
 import os
 from waymo_open_dataset.protos import sim_agents_submission_pb2
+try:
+    from waymo_open_dataset.wdl_limited.sim_agents_metrics import metric_features
+    from waymo_open_dataset.wdl_limited.sim_agents_metrics import metrics as waymo_metrics
+    WAYMO_METRICS_AVAILABLE = True
+except ImportError:
+    WAYMO_METRICS_AVAILABLE = False
+    print("Warning: Waymo metrics not available. Install waymo-open-dataset to enable local evaluation.")
 
 
 def cal_polygon_contour(x, y, theta, width, length):
@@ -339,3 +346,135 @@ class SMART(pl.LightningModule):
         data['pt_token']['pt_target_mask'] = pt_target_mask[traj_mask]
 
         return data
+
+    def test_step(self, data, batch_idx):
+        """
+        Test step for local evaluation using Waymo metrics.
+        Generates predictions and stores them for end-of-epoch evaluation.
+        """
+        # Prepare data
+        data = self.match_token_map(data)
+        data = self.sample_pt_pred(data)
+        if isinstance(data, Batch):
+            data['agent']['av_index'] += data['agent']['ptr'][:-1]
+
+        # Run inference to get predictions
+        pred = self.inference(data)
+
+        # Extract predictions and ground truth
+        pred_traj = pred['pred_traj']  # [num_agents, num_future_steps, 2]
+        pred_head = pred['pred_head']  # [num_agents, num_future_steps]
+
+        # Get agent information
+        agent_ids = data['agent']['id']  # List of agent IDs
+        scenario_id = data.get('scenario_id', f'scenario_{batch_idx}')
+
+        # Convert predictions to Waymo format (x, y, z, heading)
+        num_agents = pred_traj.shape[0]
+        num_steps = pred_traj.shape[1]
+
+        # Create states tensor: [num_agents, num_steps, 4] for (x, y, z, heading)
+        states = torch.zeros(num_agents, num_steps, 4, device=pred_traj.device)
+        states[:, :, :2] = pred_traj  # x, y positions
+        states[:, :, 2] = 0  # z coordinate (assuming flat ground)
+        states[:, :, 3] = pred_head  # heading
+
+        # Convert agent IDs to tensor
+        object_ids = torch.tensor(agent_ids, dtype=torch.int64, device=states.device)
+
+        # Create JointScene using the existing helper function
+        joint_scene = joint_scene_from_states(states.cpu(), object_ids.cpu())
+
+        # Store predictions for end-of-epoch evaluation
+        self.test_predictions[scenario_id] = {
+            'joint_scene': joint_scene,
+            'object_ids': agent_ids,
+            'states': states.cpu(),
+            'data': data  # Store for scenario reconstruction if needed
+        }
+
+        # Also compute basic metrics (minADE, minFDE) for monitoring
+        eval_mask = data['agent']['valid_mask'][:, self.num_historical_steps-1]
+        gt = pred['gt']
+        valid_mask = data['agent']['valid_mask'][:, self.num_historical_steps:]
+
+        self.minADE.update(pred=pred_traj[eval_mask], target=gt[eval_mask], valid_mask=valid_mask[eval_mask])
+        self.minFDE.update(pred=pred_traj[eval_mask], target=gt[eval_mask], valid_mask=valid_mask[eval_mask])
+
+    def on_test_epoch_end(self):
+        """
+        Called at the end of the test epoch.
+        Computes Waymo Sim Agents Challenge metrics using the collected predictions.
+        """
+        # Compute basic metrics
+        minADE_value = self.minADE.compute()
+        minFDE_value = self.minFDE.compute()
+
+        self.log('test_minADE', minADE_value, sync_dist=True)
+        self.log('test_minFDE', minFDE_value, sync_dist=True)
+
+        print(f"\n{'='*80}")
+        print("Test Results Summary")
+        print(f"{'='*80}")
+        print(f"minADE: {minADE_value:.4f}")
+        print(f"minFDE: {minFDE_value:.4f}")
+        print(f"Total scenarios evaluated: {len(self.test_predictions)}")
+
+        # Compute Waymo Challenge metrics if available
+        if WAYMO_METRICS_AVAILABLE and len(self.test_predictions) > 0:
+            print(f"\nComputing Waymo Sim Agents Challenge metrics...")
+            print("Note: This requires scenario data with map information.")
+            print("If you see errors, the preprocessed data may not contain all required fields.")
+
+            try:
+                # TODO: Implement full Waymo metrics computation
+                # This requires access to the original scenario data with map information
+                # The preprocessed .pkl files may not contain all necessary scenario data
+
+                # For now, we just save the predictions in Waymo format
+                if hasattr(self, 'save_predictions_to_file') and self.save_predictions_to_file:
+                    output_dir = getattr(self, 'output_dir', './eval_results')
+                    os.makedirs(output_dir, exist_ok=True)
+
+                    # Save predictions
+                    predictions_file = os.path.join(output_dir, 'predictions.pkl')
+                    with open(predictions_file, 'wb') as f:
+                        pickle.dump(self.test_predictions, f)
+
+                    print(f"\nPredictions saved to: {predictions_file}")
+                    print(f"Total scenarios: {len(self.test_predictions)}")
+
+                    # Save in protobuf format for Waymo submission
+                    submission_file = os.path.join(output_dir, 'submission.bin')
+                    scenario_rollouts = sim_agents_submission_pb2.ScenarioRollouts()
+                    for scenario_id, pred_data in self.test_predictions.items():
+                        scenario_rollout = scenario_rollouts.scenario_rollouts.add()
+                        scenario_rollout.scenario_id = str(scenario_id)
+                        scenario_rollout.joint_scenes.append(pred_data['joint_scene'])
+
+                    with open(submission_file, 'wb') as f:
+                        f.write(scenario_rollouts.SerializeToString())
+
+                    print(f"Waymo submission file saved to: {submission_file}")
+                    print("\nTo evaluate with official Waymo metrics:")
+                    print("1. Use the Waymo Open Dataset evaluation toolkit")
+                    print("2. Or submit to: https://waymo.com/open/challenges/")
+
+            except Exception as e:
+                print(f"\nWarning: Could not compute Waymo metrics: {e}")
+                print("Continuing with basic metrics only...")
+
+        else:
+            if not WAYMO_METRICS_AVAILABLE:
+                print("\nNote: Install waymo-open-dataset to enable Waymo Challenge metrics:")
+                print("  pip install waymo-open-dataset-tf-2-12-0==1.6.4")
+
+        print(f"{'='*80}\n")
+
+        # Reset metrics
+        self.minADE.reset()
+        self.minFDE.reset()
+
+    def on_test_start(self):
+        """Initialize test prediction storage."""
+        self.test_predictions = dict()

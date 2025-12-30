@@ -7,15 +7,15 @@ time_info: &time_info
 
 Dataset:
   root:
-  train_batch_size: 1
-  val_batch_size: 1
-  test_batch_size: 1
+  train_batch_size: 32
+  val_batch_size: 32
+  val_batch_size: 32
   shuffle: True
-  num_workers: 1
+  num_workers: 8
   pin_memory: True
   persistent_workers: True
-  train_raw_dir: ["data/valid_demo"]
-  val_raw_dir: ["data/valid_demo"]
+  train_raw_dir: ["data/waymo_processed/training"]
+  val_raw_dir: ["data/waymo_processed/validation"]
   test_raw_dir:
   transform: WaymoTargetBuilder
   train_processed_dir:

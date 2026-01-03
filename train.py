@@ -37,7 +37,9 @@ if __name__ == '__main__':
                                        monitor='val_cls_acc',
                                        every_n_epochs=1,
                                        save_top_k=5,
-                                       mode='max')
+                                       mode='max',
+                                       save_last=True  # Add this to also save last checkpoint
+                                    )
     lr_monitor = LearningRateMonitor(logging_interval='epoch')
     trainer = pl.Trainer(accelerator=trainer_config.accelerator, devices=trainer_config.devices,
                          strategy=strategy,

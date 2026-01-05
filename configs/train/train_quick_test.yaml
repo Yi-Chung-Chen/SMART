@@ -11,7 +11,7 @@ Dataset:
   val_batch_size: 64
   test_batch_size: 64
   shuffle: True
-  num_workers: 64  # Fewer workers for faster startup
+  num_workers: 32  # Fewer workers for faster startup
   pin_memory: True
   persistent_workers: False  # Disable for quick tests
   train_raw_dir: ["data/waymo_processed/training_test"]  # Change to training_test if using subset

@@ -11,9 +11,9 @@ Dataset:
   val_batch_size: 64
   test_batch_size: 64
   shuffle: True
-  num_workers: 64
+  num_workers: 8
   pin_memory: True
-  persistent_workers: True
+  persistent_workers: False
   train_raw_dir: ["data/waymo_processed/training"]
   val_raw_dir: ["data/waymo_processed/validation"]
   test_raw_dir:

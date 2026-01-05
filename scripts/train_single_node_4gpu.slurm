@@ -4,8 +4,9 @@
 #SBATCH --nodes=1                   # Single node
 #SBATCH --ntasks=1                  # Single task
 #SBATCH --gpus-per-node=4           # 4 A100 GPUs
-#SBATCH --cpus-per-task=64          # CPUs for data loading
-#SBATCH --time=48:00:00             # 48 hour limit
+#SBATCH --cpus-per-task=32          # CPUs for data loading
+#SBATCH --mem=120G                  # Memory (reasonable for 4 GPUs)
+#SBATCH --time=7-00:00:00            # 7 day limit
 #SBATCH --job-name=smart_n1_gpu4
 #SBATCH --output=logs/smart_n1_gpu4_%j.out
 #SBATCH --error=logs/smart_n1_gpu4_%j.err
@@ -17,8 +18,11 @@ mkdir -p logs
 module load rcac
 module list
 
-# Activate conda environment
-source activate SMART
+# Initialize conda for bash shell
+eval "$(conda shell.bash hook)"
+
+# Activate conda environment (lowercase 'smart')
+conda activate smart
 
 # Print job info
 echo "Job started on $(hostname) at $(date)"

@@ -1,0 +1,9 @@
+testing.tfrecord-00024-of-00150	a869787ec83d5c8a
+testing.tfrecord-00068-of-00150	981f5c4f61505759
+testing.tfrecord-00008-of-00150	9036b3f956b09fc0
+testing.tfrecord-00104-of-00150	38e2986c8098692f
+testing.tfrecord-00000-of-00150	ff6686b0e98d66ae
+testing.tfrecord-00106-of-00150	4c99903f949e8100
+testing.tfrecord-00126-of-00150	ab7571715a1d5193
+testing.tfrecord-00144-of-00150	9465fb15b456855a
+testing.tfrecord-00103-of-00150	8738e8c0200056fe

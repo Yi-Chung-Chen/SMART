@@ -597,11 +597,16 @@ def decode_map_features_from_proto(map_features):
         cur_info['polyline_index'] = (point_cnt, point_cnt + len(cur_polyline))
         point_cnt += len(cur_polyline)
 
-    # try:
-    polylines = np.concatenate(polylines, axis=0).astype(np.float32)
-    # except:
-    #     polylines = np.zeros((0, 8), dtype=np.float32)
-    #     print('Empty polylines: ')
+    if len(polylines) > 0:
+        polylines = np.concatenate(polylines, axis=0).astype(np.float32)
+        map_infos['empty_map'] = False
+    else:
+        # Create dummy road_edge to allow model inference (type 15 = road edge boundary)
+        print('Warning: Empty map features, creating dummy polyline')
+        polylines = np.array([[0.0, 0.0, 0.0, 15.0, -1],
+                              [1.0, 0.0, 0.0, 15.0, -1]], dtype=np.float32)
+        map_infos['road_edge'].append({'id': -1, 'polyline_index': (0, 2)})
+        map_infos['empty_map'] = True
     map_infos['all_polylines'] = polylines
     map_infos['lane2other_dict'] = lane2other_dict
     return map_infos
@@ -664,30 +669,46 @@ def wm2argo(file, dir_name, output_dir):
     file_path = os.path.join(dir_name, file)
     dataset = tf.data.TFRecordDataset(file_path, compression_type='', num_parallel_reads=3)
     for cnt, data in enumerate(dataset):
-        print(cnt)
-        scenario = scenario_pb2.Scenario()
-        scenario.ParseFromString(bytearray(data.numpy()))
-        save_infos = process_single_data(scenario) # pkl2mtr
-        map_info = save_infos["map_infos"]
-        track_info = save_infos['track_infos']
-        scenario_id = save_infos['scenario_id']
-        tracks_to_predict = save_infos['tracks_to_predict']
-        sdc_track_index = save_infos['sdc_track_index']
-        av_id = track_info["object_id"][sdc_track_index]
-        if len(tracks_to_predict["track_index"]) < 1:
-            return
-        dynamic_map_infos = save_infos["dynamic_map_infos"]
-        tf_lights = process_dynamic_map(dynamic_map_infos)
-        tf_current_light = tf_lights.loc[tf_lights["time_step"] == "11"]
-        map_data = get_map_features(map_info, tf_current_light)
-        new_agents_array = process_agent(track_info, tracks_to_predict, sdc_track_index, scenario_id, 0, 91) # mtr2argo
-        data = dict()
-        data['scenario_id'] = new_agents_array['scenario_id'].values[0]
-        data['city'] = new_agents_array['city'].values[0]
-        data['agent'] = get_agent_features(new_agents_array, av_id, num_historical_steps=11)
-        data.update(map_data)
-        with open(os.path.join(output_dir, scenario_id + '.pkl'), "wb+") as f:
-            pickle.dump(data, f)
+        try:
+            scenario = scenario_pb2.Scenario()
+            scenario.ParseFromString(bytearray(data.numpy()))
+            scenario_id = scenario.scenario_id
+
+            # Skip if already processed
+            output_path = os.path.join(output_dir, scenario_id + '.pkl')
+            if os.path.exists(output_path):
+                print(f"Skipping {scenario_id} (already exists)")
+                continue
+
+            print(f"Processing {file}:{cnt} - {scenario_id}")
+            save_infos = process_single_data(scenario) # pkl2mtr
+            map_info = save_infos["map_infos"]
+            # Log scenarios without map features for debugging
+            if map_info.get('empty_map', False):
+                with open('./scenario_without_map.txt', 'a') as log_file:
+                    log_file.write(f"{file}\t{scenario_id}\n")
+            track_info = save_infos['track_infos']
+            tracks_to_predict = save_infos['tracks_to_predict']
+            sdc_track_index = save_infos['sdc_track_index']
+            av_id = track_info["object_id"][sdc_track_index]
+            if len(tracks_to_predict["track_index"]) < 1:
+                continue
+            dynamic_map_infos = save_infos["dynamic_map_infos"]
+            tf_lights = process_dynamic_map(dynamic_map_infos)
+            tf_current_light = tf_lights.loc[tf_lights["time_step"] == "11"]
+            map_data = get_map_features(map_info, tf_current_light)
+            new_agents_array = process_agent(track_info, tracks_to_predict, sdc_track_index, scenario_id, 0, 91) # mtr2argo
+            data = dict()
+            data['scenario_id'] = new_agents_array['scenario_id'].values[0]
+            data['city'] = new_agents_array['city'].values[0]
+            data['agent'] = get_agent_features(new_agents_array, av_id, num_historical_steps=11)
+            data.update(map_data)
+            with open(os.path.join(output_dir, scenario_id + '.pkl'), "wb+") as f:
+                pickle.dump(data, f)
+        except Exception as e:
+            print(f"\n[ERROR] File: {file}, Record: {cnt}")
+            print(f"Error: {e}")
+            raise
 
 
 def batch_process9s_transformer(dir_name, output_dir, num_workers=2):

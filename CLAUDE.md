@@ -8,6 +8,11 @@ SMART (Scalable Multi-agent Real-time Motion Generation via Next-token Predictio
 
 ## Environment Setup
 
+**Activate environment when working in this project:**
+```bash
+source ~/.bashrc; source activate smart
+```
+
 ```bash
 # Create and activate conda environment
 conda env create -f environment.yml

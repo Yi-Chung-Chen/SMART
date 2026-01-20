@@ -1,4 +1,4 @@
-# Config for Waymo Sim Agents Challenge test set evaluation
+# Config for Waymo Sim Agents Challenge validation set evaluation (for debugging)
 time_info: &time_info
   num_historical_steps: 11
   num_future_steps: 80
@@ -12,7 +12,7 @@ Dataset:
   pin_memory: True
   persistent_workers: True
   train_raw_dir:
-  val_raw_dir: ["data/waymo_processed/testing"]
+  val_raw_dir: ["data/waymo_processed/validation"]
   test_raw_dir:
   TargetBuilder: WaymoTargetBuilder
   train_processed_dir:
@@ -60,4 +60,4 @@ Model:
 Evaluation:
   n_rollouts: 32
   n_shards: 150
-  output_dir: "./submission"
+  output_dir: "./submission_val"

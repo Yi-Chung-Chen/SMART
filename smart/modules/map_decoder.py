@@ -93,7 +93,8 @@ class SMARTMapDecoder(nn.Module):
         else:
             raise ValueError('{} is not a valid dimension'.format(self.input_dim))
 
-        token2pl = data[('pt_token', 'to', 'map_polygon')]['edge_index']
+        # token2pl = data[('pt_token', 'to', 'map_polygon')]['edge_index']
+        token2pl = data['pt_token', 'to', 'map_polygon'].edge_index 
         token_light_type = data['map_polygon']['light_type'][token2pl[1]]
         x_pt_categorical_embs = [self.type_pt_emb(data['pt_token']['type'].long()),
                                  self.polygon_type_emb(data['pt_token']['pl_type'].long()),

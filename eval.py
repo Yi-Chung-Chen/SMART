@@ -2,39 +2,59 @@
 Evaluation script for SMART model to generate Waymo Sim Agents Challenge submissions.
 
 Usage:
-    # Full test set submission
+    # Full validation set with validation enabled
     python eval.py \
-        --config configs/evaluation/eval_test.yaml \
+        --config configs/evaluation/eval_val.yaml \
         --pretrain_ckpt path/to/checkpoint.ckpt \
-        --output_dir ./submission_output
+        --tfrecord_dir data/waymo/scenario/validation \
+        --processed_dir data/waymo_processed/validation \
+        --output_dir ./submission_output \
+        --validate
 
     # Debug: Process first 10 scenarios only
     python eval.py \
         --config configs/evaluation/eval_val.yaml \
         --pretrain_ckpt path/to/checkpoint.ckpt \
+        --tfrecord_dir data/waymo/scenario/validation \
+        --processed_dir data/waymo_processed/validation \
         --output_dir ./debug_output \
         --num_scenarios 10
 
-    # Debug: Process specific scenarios by ID
+    # Test set submission (no validation)
+    python eval.py \
+        --config configs/evaluation/eval_test.yaml \
+        --pretrain_ckpt path/to/checkpoint.ckpt \
+        --tfrecord_dir data/waymo/scenario/testing \
+        --processed_dir data/waymo_processed/testing \
+        --output_dir ./submission_output
+
+    # Adjust rollout chunk size for memory management
     python eval.py \
         --config configs/evaluation/eval_val.yaml \
         --pretrain_ckpt path/to/checkpoint.ckpt \
-        --output_dir ./debug_output \
-        --scenario_ids "scenario_id_1,scenario_id_2"
+        --tfrecord_dir data/waymo/scenario/validation \
+        --processed_dir data/waymo_processed/validation \
+        --output_dir ./submission_output \
+        --rollout_chunk_size 4
 """
 
+import glob
 import os
+import pickle
 import tarfile
 from argparse import ArgumentParser
 from collections import defaultdict
 
 import pytorch_lightning as pl
+import tensorflow as tf
 import torch
-from torch_geometric.loader import DataLoader
+from torch_geometric.data import Batch, HeteroData
 from tqdm import tqdm
-from waymo_open_dataset.protos import sim_agents_submission_pb2
+from waymo_open_dataset.protos import scenario_pb2, sim_agents_submission_pb2
+from waymo_open_dataset.utils.sim_agents import submission_specs
+from waymo_open_dataset.wdl_limited.sim_agents_metrics import metrics
 
-from smart.datasets.scalable_dataset import MultiDataset
+from smart.datasets.preprocess import TokenProcessor
 from smart.model import SMART
 from smart.model.smart import joint_scene_from_states
 from smart.transforms import WaymoTargetBuilder
@@ -46,59 +66,6 @@ N_ROLLOUTS = 32  # Total rollouts per scenario
 N_SIMULATION_STEPS = 80  # Future steps to predict
 CURRENT_TIME_INDEX = 10  # Step 11 (0-indexed), last observed step
 N_SHARDS = 150  # Number of submission shards
-
-
-class FilteredDataset(MultiDataset):
-    """Dataset wrapper that filters scenarios based on provided criteria."""
-
-    def __init__(self, base_dataset, num_scenarios=None, scenario_ids=None):
-        """
-        Args:
-            base_dataset: The original MultiDataset instance
-            num_scenarios: If provided, only use first N scenarios
-            scenario_ids: If provided, only use scenarios with these IDs
-        """
-        # Copy attributes from base dataset
-        self._raw_file_names = base_dataset._raw_file_names
-        self._raw_paths = base_dataset._raw_paths
-        self._raw_file_dataset = base_dataset._raw_file_dataset
-        self.split = base_dataset.split
-        self.training = base_dataset.training
-        self.dim = base_dataset.dim
-        self.num_historical_steps = base_dataset.num_historical_steps
-        self.token_processor = base_dataset.token_processor
-        self.transform = base_dataset.transform
-
-        # Apply filtering
-        if scenario_ids is not None:
-            # Filter by specific scenario IDs
-            scenario_id_set = set(scenario_ids)
-            filtered_indices = []
-            for idx in range(len(self._raw_paths)):
-                # Extract scenario ID from filename (without .pkl extension)
-                scenario_id = os.path.splitext(os.path.basename(self._raw_paths[idx]))[0]
-                if scenario_id in scenario_id_set:
-                    filtered_indices.append(idx)
-            self._indices = filtered_indices
-        elif num_scenarios is not None:
-            # Filter by number of scenarios
-            self._indices = list(range(min(num_scenarios, len(self._raw_paths))))
-        else:
-            # Use all scenarios
-            self._indices = list(range(len(self._raw_paths)))
-
-        self._num_samples = len(self._indices)
-
-    def len(self) -> int:
-        return self._num_samples
-
-    def get(self, idx: int):
-        real_idx = self._indices[idx]
-        with open(self._raw_paths[real_idx], 'rb') as handle:
-            import pickle
-            data = pickle.load(handle)
-        data = self.token_processor.preprocess(data)
-        return data
 
 
 def create_scenario_rollouts(scenario_id, all_rollout_predictions):
@@ -118,7 +85,7 @@ def create_scenario_rollouts(scenario_id, all_rollout_predictions):
         pred_traj = rollout_pred['pred_traj']  # (n_agents, 80, 2)
         pred_head = rollout_pred['pred_head']  # (n_agents, 80)
         valid_mask = rollout_pred['valid_mask']  # (n_agents,)
-        agent_ids = rollout_pred['agent_ids'][0]  # List of agent IDs
+        agent_ids = rollout_pred['agent_ids']  # List of agent IDs
         agent_z = rollout_pred['agent_z']  # (n_agents,)
 
         # Filter to valid agents
@@ -209,31 +176,97 @@ def create_tar_archive(output_dir, shard_files):
     return tar_path
 
 
-def run_rollouts(model, data, n_rollouts):
+def iterate_tfrecord_scenarios(tfrecord_dir: str, num_scenarios: int = None):
+    """Iterate through TFRecord files, yielding (scenario, scenario_id) pairs.
+
+    Args:
+        tfrecord_dir: Directory containing TFRecord files
+        num_scenarios: Optional limit on number of scenarios to process
+
+    Yields:
+        Tuple of (scenario_pb2.Scenario, scenario_id string)
     """
-    Run multiple rollouts for a single scenario.
+    tfrecord_files = sorted(glob.glob(os.path.join(tfrecord_dir, "*.tfrecord*")))
+    count = 0
+
+    for filepath in tfrecord_files:
+        dataset = tf.data.TFRecordDataset([filepath])
+        for data in dataset:
+            if num_scenarios and count >= num_scenarios:
+                return
+            scenario = scenario_pb2.Scenario.FromString(data.numpy())
+            yield scenario, scenario.scenario_id
+            count += 1
+
+
+def load_pkl_by_scenario_id(scenario_id: str, processed_dir: str,
+                            token_processor, transform) -> HeteroData:
+    """Load preprocessed pkl file by scenario_id.
+
+    Args:
+        scenario_id: The scenario ID to load
+        processed_dir: Directory containing processed pkl files
+        token_processor: TokenProcessor instance for token preprocessing
+        transform: WaymoTargetBuilder transform to apply
+
+    Returns:
+        Transformed HeteroData, or None if not found
+    """
+    pkl_path = os.path.join(processed_dir, f"{scenario_id}.pkl")
+    if not os.path.exists(pkl_path):
+        return None
+
+    with open(pkl_path, 'rb') as f:
+        data = pickle.load(f)
+
+    # Apply token preprocessing (same as MultiDataset.get())
+    data = token_processor.preprocess(data)
+
+    # Apply transform (WaymoTargetBuilder)
+    if transform:
+        data = transform(data)
+
+    return data
+
+
+def replicate_for_rollouts(data: HeteroData, n_rollouts: int) -> Batch:
+    """Replicate single scenario data for batched inference."""
+    data_list = [data.clone() for _ in range(n_rollouts)]
+    return Batch.from_data_list(data_list)
+
+
+def run_rollouts_batched(model, data, n_rollouts, chunk_size=8):
+    """Run batched rollouts with memory-aware chunking.
 
     Args:
         model: SMART model
         data: HeteroData for one scenario
-        n_rollouts: Number of rollouts to generate
+        n_rollouts: Total number of rollouts to generate
+        chunk_size: Number of rollouts to batch together
 
     Returns:
         List of prediction dicts, one per rollout
     """
     all_predictions = []
+    num_agents = data['agent']['num_nodes']
 
-    for _ in range(n_rollouts):
-        # Run inference (stochastic sampling produces different results each time)
-        pred = model.inference(data)
+    for chunk_start in range(0, n_rollouts, chunk_size):
+        chunk_n = min(chunk_size, n_rollouts - chunk_start)
+        batched_data = replicate_for_rollouts(data, chunk_n)
 
-        all_predictions.append({
-            'pred_traj': pred['pred_traj'].cpu(),
-            'pred_head': pred['pred_head'].cpu(),
-            'valid_mask': data['agent']['valid_mask'][:, model.num_historical_steps - 1].cpu(),
-            'agent_ids': data['agent']['id'],
-            'agent_z': data['agent']['position'][:, model.num_historical_steps - 1, 2].cpu(),
-        })
+        pred = model.inference(batched_data)
+
+        # Extract predictions per rollout
+        for i in range(chunk_n):
+            start_idx = i * num_agents
+            end_idx = (i + 1) * num_agents
+            all_predictions.append({
+                'pred_traj': pred['pred_traj'][start_idx:end_idx].cpu(),
+                'pred_head': pred['pred_head'][start_idx:end_idx].cpu(),
+                'valid_mask': data['agent']['valid_mask'][:, model.num_historical_steps - 1].cpu(),
+                'agent_ids': data['agent']['id'],
+                'agent_z': data['agent']['position'][:, model.num_historical_steps - 1, 2].cpu(),
+            })
 
     return all_predictions
 
@@ -248,20 +281,21 @@ def main():
                         help='Output directory for submission files')
     parser.add_argument('--num_scenarios', type=int, default=None,
                         help='Process only first N scenarios (for debugging)')
-    parser.add_argument('--scenario_ids', type=str, default=None,
-                        help='Comma-separated list of specific scenario IDs to process')
     parser.add_argument('--n_rollouts', type=int, default=N_ROLLOUTS,
                         help=f'Number of rollouts per scenario (default: {N_ROLLOUTS})')
     parser.add_argument('--n_shards', type=int, default=N_SHARDS,
                         help=f'Number of submission shards (default: {N_SHARDS})')
     parser.add_argument('--device', type=str, default='cuda',
                         help='Device to use (cuda or cpu)')
+    parser.add_argument('--tfrecord_dir', type=str, required=True,
+                        help='Directory with raw TFRecord files')
+    parser.add_argument('--processed_dir', type=str, required=True,
+                        help='Directory with processed pkl files')
+    parser.add_argument('--validate', action='store_true',
+                        help='Enable submission_specs validation')
+    parser.add_argument('--rollout_chunk_size', type=int, default=8,
+                        help='Batch size for parallel rollouts (GPU memory management)')
     args = parser.parse_args()
-
-    # Parse scenario IDs if provided
-    scenario_ids = None
-    if args.scenario_ids:
-        scenario_ids = [s.strip() for s in args.scenario_ids.split(',')]
 
     # Set seed for reproducibility
     pl.seed_everything(2, workers=True)
@@ -270,70 +304,69 @@ def main():
     config = load_config_act(args.config)
     logger = Logging().log(level='DEBUG')
 
-    # Create dataset
-    data_config = config.Dataset
-    base_dataset = MultiDataset(
-        root=data_config.root,
-        split='val',  # Use 'val' split which maps to test for testing
-        raw_dir=data_config.val_raw_dir,
-        processed_dir=data_config.val_processed_dir,
-        transform=WaymoTargetBuilder(
-            config.Model.num_historical_steps,
-            config.Model.decoder.num_future_steps,
-            mode='val'
-        )
-    )
-
-    # Apply filtering if needed
-    if args.num_scenarios is not None or scenario_ids is not None:
-        dataset = FilteredDataset(base_dataset, args.num_scenarios, scenario_ids)
-        logger.info(f'Filtered dataset to {len(dataset)} scenarios')
-    else:
-        dataset = base_dataset
-
-    logger.info(f'Dataset size: {len(dataset)} scenarios')
-
-    # Create dataloader (batch_size=1 for scenarios)
-    dataloader = DataLoader(
-        dataset,
-        batch_size=1,
-        shuffle=False,
-        num_workers=data_config.num_workers if hasattr(data_config, 'num_workers') else 4,
-        pin_memory=True
+    # Create token processor and transform (same as MultiDataset uses)
+    token_processor = TokenProcessor(2048)
+    transform = WaymoTargetBuilder(
+        config.Model.num_historical_steps,
+        config.Model.decoder.num_future_steps,
+        mode='val'
     )
 
     # Load model
     model = SMART(config.Model)
     model.load_params_from_file(filename=args.pretrain_ckpt, logger=logger)
     model.eval()
+    model.noise = False  # Deterministic map encoding for inference
 
     # Move to device
     device = torch.device(args.device if torch.cuda.is_available() else 'cpu')
     model = model.to(device)
 
-    # Process scenarios
+    # Process scenarios using TFRecord-first approach
     scenario_rollouts_list = []
+    skipped_count = 0
 
     with torch.no_grad():
-        for batch_idx, data in enumerate(tqdm(dataloader, desc='Processing scenarios')):
-            # Move data to device
+        for scenario, scenario_id in tqdm(
+            iterate_tfrecord_scenarios(args.tfrecord_dir, args.num_scenarios),
+            desc='Processing scenarios'
+        ):
+            # Load corresponding pkl file
+            data = load_pkl_by_scenario_id(
+                scenario_id, args.processed_dir, token_processor, transform
+            )
+            if data is None:
+                logger.warning(f'Pkl not found for {scenario_id}, skipping')
+                skipped_count += 1
+                continue
+
+            # Move to device and prepare
             data = data.to(device)
-
-            # Prepare data
             data = model.match_token_map(data)
-            data = model.sample_pt_pred(data)
+            data = model.sample_pt_pred(data)  # Creates pt_valid_mask needed by map decoder
 
-            # Get scenario ID
-            scenario_id = data.get('scenario_id', f'scenario_{batch_idx}')
-            if isinstance(scenario_id, list):
-                scenario_id = scenario_id[0]
-
-            # Run multiple rollouts
-            all_rollout_predictions = run_rollouts(model, data, args.n_rollouts)
+            # Run batched rollouts
+            all_rollout_predictions = run_rollouts_batched(
+                model, data, args.n_rollouts, args.rollout_chunk_size
+            )
 
             # Create ScenarioRollouts proto
             scenario_rollouts = create_scenario_rollouts(scenario_id, all_rollout_predictions)
+
+            # Validate if enabled
+            if args.validate:
+                submission_specs.validate_scenario_rollouts(scenario_rollouts, scenario)
+
+                config = metrics.load_metrics_config()
+                scenario_metrics = metrics.compute_scenario_metrics_for_bundle(
+                    config, scenario, scenario_rollouts
+                )
+                print(scenario_metrics)
+
             scenario_rollouts_list.append(scenario_rollouts)
+
+    if skipped_count > 0:
+        logger.warning(f'Skipped {skipped_count} scenarios (pkl files not found)')
 
     logger.info(f'Processed {len(scenario_rollouts_list)} scenarios')
 

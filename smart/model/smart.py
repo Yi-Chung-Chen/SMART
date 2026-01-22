@@ -348,8 +348,9 @@ class SMART(pl.LightningModule):
                                                                             device=traj_pos.device, dtype=torch.float)], dim=-1)
         data['pt_token']['orientation'] = pt_token_orientation
         data['pt_token']['height'] = data['pt_token']['position'][:, -1]
-        data[('pt_token', 'to', 'map_polygon')] = {}
-        data[('pt_token', 'to', 'map_polygon')]['edge_index'] = token2pl
+        # data[('pt_token', 'to', 'map_polygon')] = {}
+        # data[('pt_token', 'to', 'map_polygon')]['edge_index'] = token2pl
+        data['pt_token', 'to', 'map_polygon'].edge_index = token2pl
         data['pt_token']['token_idx'] = pt_token_id
         return data
 

@@ -150,11 +150,17 @@ def create_submission_shards(scenario_rollouts_list, output_dir, n_shards=N_SHAR
             scenario_rollouts=shards[shard_idx],
             submission_type=sim_agents_submission_pb2.SimAgentsChallengeSubmission.SIM_AGENTS_SUBMISSION,
             account_name='',  # Will be filled by submission system
-            unique_method_name='SMART',
-            authors=[''],
-            affiliation='',
+            unique_method_name='SMART_from_scratch',
+            authors=['Yi-Chung Chen'],
+            affiliation='Purdue University',
             description='SMART: Scalable Multi-agent Real-time Motion Generation via Next-token Prediction',
-            method_link=''
+            method_link='https://github.com/rainmaker22/SMART',
+            # Required metadata fields
+            uses_lidar_data=False,
+            uses_camera_data=False,
+            uses_public_model_pretraining=False,
+            num_model_parameters='7M',
+            acknowledge_complies_with_closed_loop_requirement=True,
         )
 
         with open(shard_path, 'wb') as f:

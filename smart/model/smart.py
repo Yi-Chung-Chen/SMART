@@ -196,41 +196,6 @@ class SMART(pl.LightningModule):
             self.log('val_minADE', self.minADE, prog_bar=True, on_step=False, on_epoch=True, batch_size=1)
             self.log('val_minFDE', self.minFDE, prog_bar=True, on_step=False, on_epoch=True, batch_size=1)
 
-    def predict_step(self, data, batch_idx):
-        """Generate rollouts for Waymo Sim Agents Challenge evaluation.
-
-        Returns predictions for all valid agents at step 11 (CURRENT_TIME_INDEX=10).
-        """
-        data = self.match_token_map(data)
-        data = self.sample_pt_pred(data)
-
-        # Get valid agents at the current time step (step 11, index 10)
-        current_time_idx = self.num_historical_steps - 1  # 10
-        valid_mask = data['agent']['valid_mask'][:, current_time_idx].clone()
-
-        # Get scenario metadata
-        scenario_id = data.get('scenario_id', f'scenario_{batch_idx}')
-        agent_ids = data['agent']['id']  # List of agent IDs
-
-        # Get z-coordinate from step 11 position (constant z assumption)
-        agent_z = data['agent']['position'][:, current_time_idx, 2]
-
-        # Run inference
-        pred = self.inference(data)
-
-        # Extract predictions
-        pred_traj = pred['pred_traj']  # (n_agents, 80, 2)
-        pred_head = pred['pred_head']  # (n_agents, 80)
-
-        return {
-            'scenario_id': scenario_id,
-            'agent_ids': agent_ids,
-            'pred_traj': pred_traj.cpu(),
-            'pred_head': pred_head.cpu(),
-            'valid_mask': valid_mask.cpu(),
-            'agent_z': agent_z.cpu(),
-        }
-
     def on_validation_start(self):
         self.gt = []
         self.pred = []
